@@ -46,6 +46,9 @@ typedef unsigned long virtaddr_t; /* virtual addresses */
 
 typedef unsigned int mem_key_t;
 
+extern bool cfg_shared_runtime_mem;
+extern void on_runtime_map(const char *what, void *addr, size_t len, int prot,
+			   int flags);
 extern void *mem_map_anom(void *base, size_t len, size_t pgsize, int node);
 extern void *mem_map_file(void *base, size_t len, int fd, off_t offset);
 extern void *mem_map_shm(mem_key_t key, void *base, size_t len,

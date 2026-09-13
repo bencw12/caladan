@@ -10,7 +10,12 @@
 #include <base/limits.h>
 #include <runtime/thread.h>
 
+#include <sys/mman.h>
+#include <base/mem.h>
 #include "defs.h"
+
+/* stack (and static TLS) size for each kthread */
+#define KTHREAD_STACK_SIZE	(8UL << 20)
 
 static pthread_barrier_t init_barrier;
 
@@ -200,8 +205,34 @@ int runtime_init(const char *cfgpath, thread_fn_t main_fn, void *arg)
 
 	log_info("spawning %d kthreads", maxks);
 	for (i = 1; i < maxks; i++) {
-		ret = pthread_create(&tid[i], NULL, pthread_entry, NULL);
+		pthread_attr_t attr, *attrp = NULL;
+
+		/*
+		 * Give each kthread a shared stack. glibc places the thread's
+		 * static TLS block at the top of a caller-supplied stack, so
+		 * this makes both the stack and the TLS visible identically in
+		 * every address space a Junction guest may be cloned into.
+		 */
+		if (cfg_shared_runtime_mem) {
+			void *stk = mmap(NULL, KTHREAD_STACK_SIZE,
+					 PROT_READ | PROT_WRITE,
+					 MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+			if (stk == MAP_FAILED) {
+				log_err("failed to allocate kthread stack");
+				return -ENOMEM;
+			}
+			ret = pthread_attr_init(&attr);
+			BUG_ON(ret);
+			ret = pthread_attr_setstack(&attr, stk,
+						    KTHREAD_STACK_SIZE);
+			BUG_ON(ret);
+			attrp = &attr;
+		}
+
+		ret = pthread_create(&tid[i], attrp, pthread_entry, NULL);
 		BUG_ON(ret);
+		if (attrp)
+			pthread_attr_destroy(attrp);
 	}
 
 	pthread_barrier_wait(&init_barrier);

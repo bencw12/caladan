@@ -92,18 +92,32 @@ enum {
 	no_logk(LOG_DEBUG, fmt, ##__VA_ARGS__)
 #endif /* DEBUG */
 
+/*
+ * Rate-limited logging.
+ *
+ * __ever_logged exists because __last_us starts at 0 while microtime() counts
+ * from runtime start, so for the first second of a process's life
+ * (__cur_us - __last_us) is below ONE_SECOND and the *first* occurrence was
+ * suppressed along with the flood. Everything logged during startup was lost:
+ * "net: out of mbufs", "stack: failed to allocate stack memory", and the two
+ * pool-overflow hazards in stack.c and page.c, which is how those went
+ * unnoticed (see docs/bug-stack-pool-overflow.md). A rate limiter is supposed
+ * to log the first and suppress the rest.
+ */
 #define log_ratelimited(level, fmt, ...)		\
 ({							\
 	static uint64_t __last_us = 0;			\
 	static uint64_t __suppressed = 0;		\
+	static bool __ever_logged = false;		\
 	uint64_t __cur_us = microtime();		\
-	if (__cur_us - __last_us >= ONE_SECOND) {	\
+	if (!__ever_logged || __cur_us - __last_us >= ONE_SECOND) {	\
 		if (__suppressed) {			\
 			logk(level, "%s:%d %s() suppressed %ld times", \
 			     __FILE__, __LINE__, __func__, __suppressed); \
 			__suppressed = 0;		\
 		}					\
 		logk(level, fmt, ##__VA_ARGS__);	\
+		__ever_logged = true;			\
 		__last_us = __cur_us;			\
 	} else						\
 		__suppressed++;				\

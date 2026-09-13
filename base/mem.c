@@ -29,6 +29,19 @@
 #endif
 
 bool cfg_transparent_hugepages_enabled;
+/* map runtime memory MAP_SHARED so it survives address-space cloning */
+bool cfg_shared_runtime_mem = true;
+
+/*
+ * Called whenever the runtime maps memory for itself. Junction overrides this
+ * to record LibOS allocations, which are the ones that have to be visible from
+ * every guest address space.
+ */
+__weak void on_runtime_map(const char *what, void *addr, size_t len, int prot,
+			   int flags)
+{
+	(void)what; (void)addr; (void)len; (void)prot; (void)flags;
+}
 
 /* libc conflicts with linux/shm.h, so define these ourselves */
 void* shmat(int shm_id, const void *addr, int flags);
@@ -54,7 +67,14 @@ __mem_map_anom(void *base, size_t len, size_t pgsize,
 	       unsigned long *mask, int numa_policy)
 {
 	void *addr;
-	int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE;
+	/*
+	 * Junction runs guest processes in separate address spaces, each one
+	 * created by cloning the host process. The runtime's own memory must
+	 * therefore be shared rather than copied, or the LibOS state would
+	 * silently fork along with the guest. See junction/kernel/as.h.
+	 */
+	int flags = (cfg_shared_runtime_mem ? MAP_SHARED : MAP_PRIVATE) |
+		    MAP_ANONYMOUS | MAP_POPULATE;
 
 	len = align_up(len, pgsize);
 
@@ -101,6 +121,7 @@ __mem_map_anom(void *base, size_t len, size_t pgsize,
 	}
 
 	touch_mapping(addr, len, pgsize);
+	on_runtime_map("mem_map_anom", addr, len, PROT_READ | PROT_WRITE, flags);
 	return addr;
 
 fail:

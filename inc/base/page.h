@@ -49,7 +49,14 @@ BUILD_ASSERT(PGSIZE_2MB % sizeof(struct page) == 0);
 /* per NUMA node page tables are stored in a contiguous array */
 extern struct page *page_tbl;
 
-#define PAGE_BASE_ADDR	0x100000000000UL  /* the start of page mappings */
+/*
+ * The runtime's memory must not share a 512 GB top-level paging slot with any
+ * guest, because Junction shares the page tables for these ranges across every
+ * guest address space (see docs/shared-page-tables.md). Guests are confined
+ * below 0x500000000000, so both pools live above it. This region spans
+ * LGPAGE_META_ENTS * 2 MB * NNUMA = 256 GB, which fits in one slot.
+ */
+#define PAGE_BASE_ADDR	0x510000000000UL  /* the start of page mappings */
 #define PAGE_END_ADDR	(PAGE_BASE_ADDR + LGPAGE_META_ENTS * PGSIZE_2MB * NNUMA)
 
 /**

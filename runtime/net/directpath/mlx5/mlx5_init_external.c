@@ -7,6 +7,7 @@
 #include <sys/mman.h>
 
 #include <base/log.h>
+#include <base/mem.h>
 #include <base/mempool.h>
 #include <iokernel/control.h>
 
@@ -116,6 +117,8 @@ int mlx5_init_ext_late(struct directpath_spec *spec, int bar_fd, int mem_fd)
 	memfd_reg.len = spec->memfd_region_size;
 	memfd_reg.base = mmap(NULL, memfd_reg.len, PROT_READ | PROT_WRITE,
 		                  MAP_SHARED, mem_fd, 0);
+	on_runtime_map("directpath-memfd", memfd_reg.base, memfd_reg.len,
+	               PROT_READ | PROT_WRITE, MAP_SHARED);
 	if (unlikely(memfd_reg.base == MAP_FAILED)) {
 		log_err("mlx5_ext: failed to map memfd region (errno %d)", errno);
 		return -1;
@@ -189,6 +192,10 @@ int mlx5_init_ext_late(struct directpath_spec *spec, int bar_fd, int mem_fd)
 			bar_reg = mmap(NULL, PGSIZE_4KB, PROT_READ | PROT_WRITE,
 				           MAP_SHARED, bar_fd,
 				           spec->offs + PGSIZE_4KB * spec->qs[i].uarn);
+			/* device MMIO (VM_IO|VM_PFNMAP): the one directpath mapping
+			 * whose behaviour across an mm clone is not obvious. */
+			on_runtime_map("directpath-uar-mmio", bar_reg, PGSIZE_4KB,
+			               PROT_READ | PROT_WRITE, MAP_SHARED);
 			if (unlikely(bar_reg == MAP_FAILED)) {
 				log_err("failed to mmap bfreg");
 				return -1;
