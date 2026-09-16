@@ -47,6 +47,13 @@ static inline int8_t atomic8_fetch_and_add_relaxed(atomic8_t *a, int8_t val)
 	return __atomic_fetch_add(&a->cnt, val, __ATOMIC_RELAXED);
 }
 
+static inline bool atomic8_cmpxchg_weak_relaxed(atomic8_t *a, int8_t *expected,
+						int8_t val)
+{
+	return __atomic_compare_exchange_n(&a->cnt, expected, val, true,
+					   __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+}
+
 static inline int atomic_fetch_and_sub(atomic_t *a, int val)
 {
 	return __sync_fetch_and_sub(&a->cnt, val);

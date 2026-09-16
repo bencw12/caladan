@@ -14,10 +14,42 @@
 
 // Returns true if this thread was interrupted.
 // @th must be thread_self().
+//
+// Arming is idempotent: it adds WAKER_VAL only if PREPARED_FLAG is not already
+// set. That keeps both halves of the protocol honest.
+//
+// Every caller returns early when this reports an interrupt, without parking
+// and without registering with a waker -- so the WAKER_VAL it added is a credit
+// nobody will ever subtract. Adding one per call let it accumulate: two rounds
+// and interrupt_state exceeds 2*WAKER_VAL, after which a waker's subtraction in
+// interruptible_wake() can never reach zero and never calls thread_ready(). The
+// thread is then wakeable only by interrupts and hangs for good once they stop.
+// Observed as istate=131 on a thread parked in a futex wait whose waiter had
+// already been dequeued; see docs/bug-fork-storm-hang.md.
+//
+// The two obvious alternatives are both wrong, and were both measured:
+//
+//   - subtracting the credit after an early return, or declining to arm at all,
+//     clears PREPARED_FLAG. But the flag is what tells an in-flight waker to
+//     take the refcount path: interruptible_wake_test() readies the thread
+//     unconditionally when it is not set, which readies a thread that is
+//     already running -- BUG_ON(th->thread_ready) in thread_ready_prepare().
+//     Declining to arm turned 7 hangs in 30 runs into 4 assertion failures.
+//
+// Leaving the flag set while refusing to double-count keeps wakers on the
+// refcount path and keeps at most one credit outstanding.
 static inline bool prepare_interruptible(thread_t *th)
 {
 	assert(th == thread_self());
-	return atomic8_fetch_and_add_relaxed(&th->interrupt_state, WAKER_VAL) > 0;
+	int8_t old = atomic8_read(&th->interrupt_state);
+	while (true) {
+		/* Already armed and uncollected: do not add a second credit. */
+		if (old & PREPARED_FLAG)
+			return (old & PREPARED_MASK) > 0;
+		if (atomic8_cmpxchg_weak_relaxed(&th->interrupt_state, &old,
+						 old + WAKER_VAL))
+			return (old & PREPARED_MASK) > 0;
+	}
 }
 
 // Called after enqueuing a signal to set the interrupt flag.

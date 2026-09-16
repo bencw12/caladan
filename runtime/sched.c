@@ -580,7 +580,14 @@ void thread_park_and_preempt_enable(void)
 static void thread_ready_prepare(struct kthread *k, thread_t *th)
 {
 	/* check for misuse where a ready thread is marked ready again */
-	BUG_ON(th->thread_ready);
+	if (unlikely(th->thread_ready)) {
+		log_err("double ready: istate=%d running=%d in_syscall=%d link_armed=%d ra0=%p ra1=%p ra2=%p",
+			atomic8_read(&th->interrupt_state), th->thread_running,
+			th->in_syscall, th->link_armed,
+			__builtin_return_address(0), __builtin_return_address(1),
+			__builtin_return_address(2));
+		BUG_ON(th->thread_ready);
+	}
 
 	/* prepare thread to be runnable */
 	th->thread_ready = true;
