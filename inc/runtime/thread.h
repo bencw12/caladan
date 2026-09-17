@@ -44,6 +44,10 @@ struct thread {
 	uint64_t	tlsvar;
 	uint64_t	fsbase;
 	unsigned long	junction_cold_state_buf[32];
+	/* diagnostics: who last made this thread runnable, and the interrupt
+	 * state at that moment. See thread_ready_prepare(). */
+	void		*last_ready_ra;
+	int8_t		last_ready_istate;
 };
 
 extern uint64_t thread_get_total_cycles(thread_t *th);

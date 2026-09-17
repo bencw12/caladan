@@ -581,13 +581,14 @@ static void thread_ready_prepare(struct kthread *k, thread_t *th)
 {
 	/* check for misuse where a ready thread is marked ready again */
 	if (unlikely(th->thread_ready)) {
-		log_err("double ready: istate=%d running=%d in_syscall=%d link_armed=%d ra0=%p ra1=%p ra2=%p",
-			atomic8_read(&th->interrupt_state), th->thread_running,
+		log_err("double ready: th=%p istate=%d running=%d in_syscall=%d link_armed=%d "
+			"FIRST ready by %p (istate then %d)",
+			th, atomic8_read(&th->interrupt_state), th->thread_running,
 			th->in_syscall, th->link_armed,
-			__builtin_return_address(0), __builtin_return_address(1),
-			__builtin_return_address(2));
+			th->last_ready_ra, th->last_ready_istate);
 		BUG_ON(th->thread_ready);
 	}
+	th->last_ready_istate = atomic8_read(&th->interrupt_state);
 
 	/* prepare thread to be runnable */
 	th->thread_ready = true;
@@ -671,6 +672,15 @@ void thread_ready_head_locked(thread_t *th)
  */
 void thread_ready(thread_t *th)
 {
+	/* Diagnostic for a double ready: capture the caller here, where the
+	 * return address is the real waker rather than an inlined helper. */
+	if (unlikely(th->thread_ready))
+		log_err("double ready SECOND caller=%p th=%p istate=%d running=%d in_syscall=%d",
+			__builtin_return_address(0), th,
+			atomic8_read(&th->interrupt_state), th->thread_running,
+			th->in_syscall);
+	else
+		th->last_ready_ra = __builtin_return_address(0);
 	struct kthread *k;
 	uint32_t rq_tail;
 
@@ -706,6 +716,7 @@ void thread_ready(thread_t *th)
  */
 void thread_ready_head(thread_t *th)
 {
+	if (!th->thread_ready) th->last_ready_ra = __builtin_return_address(0);
 	struct kthread *k;
 	thread_t *oldestth;
 
