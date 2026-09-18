@@ -6,6 +6,7 @@
 
 #include <base/slab.h>
 #include <base/mem.h>
+#include <base/syscall.h>
 #include <base/page.h>
 #include <base/lock.h>
 #include <base/list.h>
@@ -87,68 +88,22 @@ static void page_free_check(struct page *pg, size_t pgsize) {;}
 
 #endif /* DEBUG */
 
-/*
- * How much of the large-page pool is reserved up front, in 2 MB units.
- *
- * Junction creates a guest address space by cloning the host process, so a
- * mapping made after a clone is only present in the address space that made
- * it. The runtime's heap therefore has to exist as one mapping before the
- * first clone rather than growing a mapping at a time. The reservation is
- * sparse, so this costs address space, not memory.
- */
-#define LGPAGE_POOL_ENTRIES	512
-
-static unsigned int nr_pooled_lgpages;
-
-/*
- * Test affordance, mirroring stack.c. This pool backs *everything* Caladan
- * allocates dynamically -- uthread control blocks (thread_slab), mbufs,
- * smalloc, and the 4 KB page slab -- so overflowing it is a broader hazard
- * than the stack pool. Reaching it honestly takes 1 GB of live runtime
- * allocations; shrinking the reservation reaches the identical path sooner.
- */
-static int lgpage_pool_entries(void)
-{
-	const char *e = getenv("JUNCTION_DEBUG_LGPAGE_POOL_ENTRIES");
-	if (e) {
-		int n = atoi(e);
-		if (n >= 0)
-			return n;
-	}
-	return LGPAGE_POOL_ENTRIES;
-}
-
 static int lgpage_create(struct page *pg, int numa_node)
 {
 	void *pgaddr = lgpage_to_addr(pg);
 
-	if ((unsigned int)(pg - page_tbl) < nr_pooled_lgpages) {
-		/* Already covered by the up-front reservation. */
-		kref_init(&pg->ref);
-		pg->flags = PAGE_FLAG_LARGE | PAGE_FLAG_IN_USE;
-		return 0;
-	}
-
-	on_runtime_map("lgpage_create", pgaddr, PGSIZE_2MB,
-		       PROT_READ | PROT_WRITE, 0);
-
 	/*
-	 * log_err, not log_warn: past this point Caladan's thread structs,
-	 * mbufs and small allocations live in one address space only. The
-	 * log_warn_ratelimited that used to be here never appeared in output
-	 * even when the path was taken hundreds of times -- see
-	 * docs/bug-stack-pool-overflow.md for the same problem in stack.c.
+	 * This page's fixed slice of the region's memfd. The binding is the
+	 * same every time this index is used, so for an index that was used
+	 * before this replaces the mapping with itself -- never a rebinding.
+	 * Address spaces that never saw this page repair it on first touch.
 	 */
-	if (nr_pooled_lgpages)
-		log_err_ratelimited("page: growing the heap past the reserved pool; "
-				    "new memory is visible only in the address "
-				    "space that allocated it\n");
-
-	pgaddr = mem_map_anom(pgaddr, PGSIZE_2MB, PGSIZE_2MB, numa_node);
-	if (pgaddr == MAP_FAILED) {
+	if (!runtime_mem_region_map(&runtime_lgpage_region, pgaddr, PGSIZE_2MB)) {
 		log_err_ratelimited("page: out of 2mb pages\n");
 		return -ENOMEM;
 	}
+	if (cfg_transparent_hugepages_enabled)
+		syscall_madvise(pgaddr, PGSIZE_2MB, MADV_HUGEPAGE);
 
 	kref_init(&pg->ref);
 	pg->flags = PAGE_FLAG_LARGE | PAGE_FLAG_IN_USE;
@@ -157,9 +112,9 @@ static int lgpage_create(struct page *pg, int numa_node)
 
 static void lgpage_destroy(struct page *pg)
 {
-	/* Pooled pages belong to the up-front reservation; never unmap them. */
-	if ((unsigned int)(pg - page_tbl) >= nr_pooled_lgpages)
-		munmap(lgpage_to_addr(pg), PGSIZE_2MB);
+	/* Return the memory; the mapping and the binding are permanent. */
+	runtime_mem_region_release(&runtime_lgpage_region, lgpage_to_addr(pg),
+				   PGSIZE_2MB);
 	pg->flags = 0;
 }
 
@@ -425,25 +380,15 @@ int page_init(void)
 
 	page_tbl = addr;
 
-	if (cfg_shared_runtime_mem) {
-		int lgentries = lgpage_pool_entries();
-		size_t len = (size_t)lgentries * PGSIZE_2MB;
-		void *p = mmap((void *)PAGE_BASE_ADDR, len,
-			       PROT_READ | PROT_WRITE,
-			       MAP_SHARED | MAP_ANONYMOUS | MAP_NORESERVE |
-			       MAP_FIXED_NOREPLACE, -1, 0);
-		if (p != (void *)PAGE_BASE_ADDR) {
-			log_err("page: could not reserve the large page pool");
-			return -ENOMEM;
-		}
-		/* Ask for huge pages without requiring a hugetlb reservation. */
-		madvise(p, len, MADV_HUGEPAGE);
-		nr_pooled_lgpages = lgentries;
-		log_info("page: reserved %d shared large pages (%ld MB)",
-			 lgentries, len >> 20);
-	}
-
-	return 0;
+	/*
+	 * The large pages themselves: the whole index space, reserved, backed
+	 * by a memfd on first use. There is no pool and nothing to overflow --
+	 * the limit is LGPAGE_META_ENTS, the same limit the page table has.
+	 */
+	return runtime_mem_region_init(&runtime_lgpage_region, "runtime-lgpages",
+				       PAGE_BASE_ADDR,
+				       PAGE_END_ADDR - PAGE_BASE_ADDR,
+				       PGSIZE_2MB);
 }
 
 /**

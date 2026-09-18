@@ -49,6 +49,37 @@ typedef unsigned int mem_key_t;
 extern bool cfg_shared_runtime_mem;
 extern void on_runtime_map(const char *what, void *addr, size_t len, int prot,
 			   int flags);
+
+/*
+ * A runtime memory region that any address space can repair on demand.
+ *
+ * Junction creates a guest address space by cloning the host process, so a
+ * mapping made afterwards exists only where it was made. A region is backed
+ * by one memfd at a fixed binding, offset = addr - base: the whole index space
+ * is reserved PROT_NONE up front (address space, not memory), each slice is
+ * mapped from the memfd on first use, and freeing punches the pages out of
+ * the memfd but keeps the mapping and the binding. A fault at any address in
+ * the region, from any address space, is repaired by Junction with that same
+ * arithmetic, which is safe precisely because the binding never changes.
+ */
+struct runtime_mem_region {
+	const char	*name;
+	uintptr_t	base;
+	size_t		len;
+	size_t		granule;	/* what one fault repairs */
+	int		fd;
+};
+
+extern struct runtime_mem_region runtime_lgpage_region;
+extern struct runtime_mem_region runtime_stack_region;
+
+extern int runtime_mem_region_init(struct runtime_mem_region *r,
+				   const char *name, uintptr_t base,
+				   size_t len, size_t granule);
+extern void *runtime_mem_region_map(struct runtime_mem_region *r, void *addr,
+				    size_t len);
+extern int runtime_mem_region_release(struct runtime_mem_region *r,
+				      void *addr, size_t len);
 extern void *mem_map_anom(void *base, size_t len, size_t pgsize, int node);
 extern void *mem_map_file(void *base, size_t len, int fd, off_t offset);
 extern void *mem_map_shm(mem_key_t key, void *base, size_t len,

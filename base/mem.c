@@ -6,6 +6,7 @@
 #include <linux/mman.h>
 #include <linux/shm.h>
 
+#include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -41,6 +42,125 @@ __weak void on_runtime_map(const char *what, void *addr, size_t len, int prot,
 			   int flags)
 {
 	(void)what; (void)addr; (void)len; (void)prot; (void)flags;
+}
+
+#ifndef MFD_ALLOW_SEALING
+#define MFD_ALLOW_SEALING 0x0002U
+#endif
+#ifndef F_ADD_SEALS
+#define F_ADD_SEALS 1033
+#define F_SEAL_SEAL 0x0001
+#define F_SEAL_SHRINK 0x0002
+#define F_SEAL_GROW 0x0004
+#endif
+
+struct runtime_mem_region runtime_lgpage_region = { .fd = -1 };
+struct runtime_mem_region runtime_stack_region = { .fd = -1 };
+
+/**
+ * runtime_mem_region_init - creates a region's memfd and reserves its slot
+ * @r: the region
+ * @name: for the memfd and for logs
+ * @base: where the region lives; must be free, and stays so
+ * @len: the whole index space, however much of it is ever used
+ * @granule: the unit one fault repairs (a page, a stack)
+ *
+ * Runs at init, before any guest exists and before the seccomp filter, so
+ * libc is fine here. Returns 0 if successful, otherwise -errno.
+ */
+int runtime_mem_region_init(struct runtime_mem_region *r, const char *name,
+			    uintptr_t base, size_t len, size_t granule)
+{
+	void *p;
+	int fd;
+
+	/* Sealed: the kernel enforces the size at fault time, not mmap time,
+	 * so a size that could change would not be a bound. */
+	fd = memfd_create(name, MFD_CLOEXEC | MFD_ALLOW_SEALING);
+	if (fd < 0)
+		return -errno;
+	if (ftruncate(fd, len) < 0 ||
+	    fcntl(fd, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) < 0) {
+		close(fd);
+		return -errno;
+	}
+
+	/* One PROT_NONE reservation over the whole index space, made before
+	 * the first clone so it exists in every address space. It costs
+	 * address space only, and it keeps anything else out of the region.
+	 * There is no pool to overflow: the limit is the index space. */
+	p = mmap((void *)base, len, PROT_NONE,
+		 MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE |
+		 MAP_FIXED_NOREPLACE, -1, 0);
+	if (p != (void *)base) {
+		log_err("%s: could not reserve 0x%lx-0x%lx", name, base,
+			base + len);
+		if (p != MAP_FAILED)
+			munmap(p, len);
+		close(fd);
+		return -ENOMEM;
+	}
+
+	r->name = name;
+	r->base = base;
+	r->len = len;
+	r->granule = granule;
+	r->fd = fd;
+	log_info("%s: 0x%lx-0x%lx (%ld GB of address space) backed by fd %d",
+		 name, base, base + len, len >> 30, fd);
+	return 0;
+}
+
+/**
+ * runtime_mem_region_map - maps a slice of a region from its memfd
+ * @r: the region
+ * @addr: the slice's fixed address, inside the region
+ * @len: bytes
+ *
+ * The binding is (fd, addr - base), the same every time this address is
+ * used, so mapping a slice that is already mapped -- here or anywhere else --
+ * installs the identical mapping. That is what makes it safe for an address
+ * space that still holds the old mapping: nothing is ever rebound.
+ *
+ * Returns @addr, or NULL on failure.
+ */
+void *runtime_mem_region_map(struct runtime_mem_region *r, void *addr,
+			     size_t len)
+{
+	void *p;
+
+	assert(r->fd >= 0);
+	assert((uintptr_t)addr >= r->base &&
+	       (uintptr_t)addr + len <= r->base + r->len);
+
+	p = syscall_mmap(addr, len, PROT_READ | PROT_WRITE,
+			 MAP_SHARED | MAP_FIXED, r->fd,
+			 (uintptr_t)addr - r->base);
+	if ((intptr_t)p < 0)
+		return NULL;
+	on_runtime_map(r->name, addr, len, PROT_READ | PROT_WRITE,
+		       MAP_SHARED | MAP_FIXED);
+	return p;
+}
+
+/**
+ * runtime_mem_region_release - returns a slice's memory, keeping its mapping
+ * @r: the region
+ * @addr: the slice
+ * @len: bytes
+ *
+ * Neither munmap nor MADV_DONTNEED frees a page of a shared memfd mapping;
+ * only a hole punch does, and on a shared mapping MADV_REMOVE is exactly that
+ * (madvise_remove -> vfs_fallocate PUNCH_HOLE). The mapping and the binding
+ * stay, so the next use of this address needs no new binding and reads zeros.
+ *
+ * Returns 0 if successful, otherwise -errno.
+ */
+int runtime_mem_region_release(struct runtime_mem_region *r, void *addr,
+			       size_t len)
+{
+	assert(r->fd >= 0);
+	return syscall_madvise(addr, len, MADV_REMOVE);
 }
 
 /* libc conflicts with linux/shm.h, so define these ourselves */
