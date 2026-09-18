@@ -674,13 +674,7 @@ void thread_ready(thread_t *th)
 {
 	/* Diagnostic for a double ready: capture the caller here, where the
 	 * return address is the real waker rather than an inlined helper. */
-	if (unlikely(th->thread_ready))
-		log_err("double ready SECOND caller=%p th=%p istate=%d running=%d in_syscall=%d",
-			__builtin_return_address(0), th,
-			atomic8_read(&th->interrupt_state), th->thread_running,
-			th->in_syscall);
-	else
-		th->last_ready_ra = __builtin_return_address(0);
+	if (!th->thread_ready) th->last_ready_ra = __builtin_return_address(0);
 	struct kthread *k;
 	uint32_t rq_tail;
 
