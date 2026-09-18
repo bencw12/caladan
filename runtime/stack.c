@@ -131,7 +131,7 @@ int runtime_stack_init(void)
 					  STACK_BASE_ADDR,
 					  (size_t)RUNTIME_MAX_THREADS *
 						  sizeof(struct stack),
-					  sizeof(struct stack));
+					  sizeof(struct stack), 0);
 	if (ret)
 		return ret;
 

@@ -7,6 +7,7 @@
 #include <linux/shm.h>
 
 #include <errno.h>
+#include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -44,6 +45,12 @@ __weak void on_runtime_map(const char *what, void *addr, size_t len, int prot,
 	(void)what; (void)addr; (void)len; (void)prot; (void)flags;
 }
 
+#ifndef MFD_HUGETLB
+#define MFD_HUGETLB 0x0004U
+#endif
+#ifndef MFD_HUGE_2MB
+#define MFD_HUGE_2MB (21U << 26)
+#endif
 #ifndef MFD_ALLOW_SEALING
 #define MFD_ALLOW_SEALING 0x0002U
 #endif
@@ -69,21 +76,35 @@ struct runtime_mem_region runtime_stack_region = { .fd = -1 };
  * libc is fine here. Returns 0 if successful, otherwise -errno.
  */
 int runtime_mem_region_init(struct runtime_mem_region *r, const char *name,
-			    uintptr_t base, size_t len, size_t granule)
+			    uintptr_t base, size_t len, size_t granule,
+			    unsigned int memfd_flags)
 {
+	const char *backing = memfd_flags & MFD_HUGETLB ? "2 MB hugetlb pages" :
+							  "4 KB pages";
 	void *p;
 	int fd;
 
 	/* Sealed: the kernel enforces the size at fault time, not mmap time,
 	 * so a size that could change would not be a bound. */
-	fd = memfd_create(name, MFD_CLOEXEC | MFD_ALLOW_SEALING);
+	fd = memfd_create(name, MFD_CLOEXEC | MFD_ALLOW_SEALING | memfd_flags);
+	if (fd < 0 && (memfd_flags & MFD_HUGETLB)) {
+		/* No hugetlb pool (or a kernel without hugetlb memfds): the
+		 * region still works on ordinary pages, only slower. */
+		log_warn("%s: hugetlb memfd unavailable (%s); using 4 KB pages",
+			 name, strerror(errno));
+		backing = "4 KB pages (hugetlb unavailable)";
+		fd = memfd_create(name, MFD_CLOEXEC | MFD_ALLOW_SEALING);
+	}
 	if (fd < 0)
 		return -errno;
-	if (ftruncate(fd, len) < 0 ||
-	    fcntl(fd, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) < 0) {
+	if (ftruncate(fd, len) < 0) {
 		close(fd);
 		return -errno;
 	}
+	/* Seals are defence in depth; a filesystem that lacks them is not a
+	 * reason to fail. */
+	if (fcntl(fd, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) < 0)
+		log_warn("%s: could not seal the memfd (%s)", name, strerror(errno));
 
 	/* One PROT_NONE reservation over the whole index space, made before
 	 * the first clone so it exists in every address space. It costs
@@ -106,8 +127,8 @@ int runtime_mem_region_init(struct runtime_mem_region *r, const char *name,
 	r->len = len;
 	r->granule = granule;
 	r->fd = fd;
-	log_info("%s: 0x%lx-0x%lx (%ld GB of address space) backed by fd %d",
-		 name, base, base + len, len >> 30, fd);
+	log_info("%s: 0x%lx-0x%lx (%ld GB of address space) backed by fd %d, %s",
+		 name, base, base + len, len >> 30, fd, backing);
 	return 0;
 }
 

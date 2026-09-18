@@ -7,6 +7,13 @@
 #include <base/slab.h>
 #include <base/mem.h>
 #include <base/syscall.h>
+
+#ifndef MFD_HUGETLB
+#define MFD_HUGETLB 0x0004U
+#endif
+#ifndef MFD_HUGE_2MB
+#define MFD_HUGE_2MB (21U << 26)
+#endif
 #include <base/page.h>
 #include <base/lock.h>
 #include <base/list.h>
@@ -384,11 +391,18 @@ int page_init(void)
 	 * The large pages themselves: the whole index space, reserved, backed
 	 * by a memfd on first use. There is no pool and nothing to overflow --
 	 * the limit is LGPAGE_META_ENTS, the same limit the page table has.
+	 *
+	 * Backed by 2 MB hugetlb pages unless transparent huge pages are on, the
+	 * same choice __mem_map_anom() made for these pages before: Caladan's
+	 * slabs and network buffers are sized and aligned for real 2 MB pages,
+	 * and the hugetlb pool is where they came from.
 	 */
 	return runtime_mem_region_init(&runtime_lgpage_region, "runtime-lgpages",
 				       PAGE_BASE_ADDR,
 				       PAGE_END_ADDR - PAGE_BASE_ADDR,
-				       PGSIZE_2MB);
+				       PGSIZE_2MB,
+				       cfg_transparent_hugepages_enabled
+					       ? 0 : MFD_HUGETLB | MFD_HUGE_2MB);
 }
 
 /**

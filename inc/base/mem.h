@@ -73,9 +73,16 @@ struct runtime_mem_region {
 extern struct runtime_mem_region runtime_lgpage_region;
 extern struct runtime_mem_region runtime_stack_region;
 
+/*
+ * @memfd_flags: extra memfd_create() flags. MFD_HUGETLB | MFD_HUGE_2MB gives a
+ * region whose pages are 2 MB hugetlb pages from the kernel's pool -- what
+ * Caladan's large pages were before this, and what its slabs and network
+ * buffers are sized for. Falls back to ordinary pages if the pool is missing.
+ */
 extern int runtime_mem_region_init(struct runtime_mem_region *r,
 				   const char *name, uintptr_t base,
-				   size_t len, size_t granule);
+				   size_t len, size_t granule,
+				   unsigned int memfd_flags);
 extern void *runtime_mem_region_map(struct runtime_mem_region *r, void *addr,
 				    size_t len);
 extern int runtime_mem_region_release(struct runtime_mem_region *r,
