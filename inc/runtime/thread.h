@@ -47,6 +47,8 @@ struct thread {
 	/* diagnostics: who last made this thread runnable, and the interrupt
 	 * state at that moment. See thread_ready_prepare(). */
 	void		*last_ready_ra;
+	void		*last_ready_timer_fn;	/* if readied from a timer callback: its fn */
+	unsigned long	last_ready_timer_arg;	/* ... and its arg */
 	int8_t		last_ready_istate;
 };
 
@@ -91,3 +93,4 @@ static inline thread_t *thread_self(void)
 extern void thread_yield(void);
 extern int thread_spawn(thread_fn_t fn, void *arg);
 extern void thread_exit(void) __noreturn;
+extern void thread_exit_np(void) __noreturn;

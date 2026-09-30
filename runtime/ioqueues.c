@@ -29,7 +29,7 @@
 #include "defs.h"
 #include "net/defs.h"
 
-#define PACKET_QUEUE_MCOUNT	4096
+#define PACKET_QUEUE_MCOUNT	512   /* was 4096: the egress pool is 8x this per kthread in 2 MB hugepages; 512 keeps a sandbox at ~10 pages instead of 42 */
 #define LRPC_QUEUE_SIZE_DIRECTPATH 16
 
 static size_t lrpc_q_size(void)

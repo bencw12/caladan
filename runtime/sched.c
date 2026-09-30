@@ -16,6 +16,7 @@
 #include <base/log.h>
 #include <runtime/sync.h>
 #include <runtime/thread.h>
+#include <runtime/timer.h>
 #include <runtime/interruptible_wait.h>
 
 #include "defs.h"
@@ -337,7 +338,38 @@ static __noinline void schedule(void)
 	assert(l->parked == false);
 
 	/* detect misuse of preempt disable */
-	BUG_ON((perthread_read(preempt_cnt) & ~PREEMPT_NOT_PENDING) != 1);
+	if (unlikely((perthread_read(preempt_cnt) & ~PREEMPT_NOT_PENDING) != 1)) {
+		/*
+		 * We got here through a stack switch, so a backtrace shows
+		 * nothing. Say who came in and from where instead: the thread's
+		 * saved rip is inside whichever of park/yield it called, and the
+		 * words above its saved rsp that point into our text are, near
+		 * enough, its call chain. (Subtract the printed base and give
+		 * the offsets to addr2line.)
+		 */
+		extern char __executable_start[], etext[];
+		thread_t *me = thread_self();
+		log_emerg("sched: preempt_cnt %u entering schedule(); thread %p "
+			  "junction=%d rip=%lx rsp=%lx text base=%p",
+			  perthread_read(preempt_cnt) & ~PREEMPT_NOT_PENDING, me,
+			  me ? me->junction_thread : -1,
+			  me ? (unsigned long)me->tf.rip : 0UL,
+			  me ? (unsigned long)me->tf.rsp : 0UL, __executable_start);
+		if (me && me->tf.rsp) {
+			unsigned long *sp = (unsigned long *)me->tf.rsp;
+			int shown = 0;
+			for (i = 0; i < 512 && shown < 24; i++) {
+				unsigned long w = sp[i];
+				if (w >= (unsigned long)__executable_start &&
+				    w < (unsigned long)etext) {
+					log_emerg("sched:   [rsp+%d] %lx (+0x%lx)", i * 8, w,
+						  w - (unsigned long)__executable_start);
+					shown++;
+				}
+			}
+		}
+		BUG();
+	}
 
 	/* update entry stat counters */
 	STAT(RESCHEDULES)++;
@@ -581,14 +613,22 @@ static void thread_ready_prepare(struct kthread *k, thread_t *th)
 {
 	/* check for misuse where a ready thread is marked ready again */
 	if (unlikely(th->thread_ready)) {
+		struct timer_entry *cur = k->timer_cur;
 		log_err("double ready: th=%p istate=%d running=%d in_syscall=%d link_armed=%d "
-			"FIRST ready by %p (istate then %d)",
+			"FIRST ready by %p (istate then %d, timer fn %p arg %lx); "
+			"NOW by timer fn %p arg %lx (th is %s)",
 			th, atomic8_read(&th->interrupt_state), th->thread_running,
 			th->in_syscall, th->link_armed,
-			th->last_ready_ra, th->last_ready_istate);
+			th->last_ready_ra, th->last_ready_istate,
+			th->last_ready_timer_fn, th->last_ready_timer_arg,
+			cur ? (void *)cur->fn : NULL, cur ? cur->arg : 0UL,
+			th == k->timer_softirq ? "the timer softirq" :
+			th == thread_self() ? "thread_self" : "another thread");
 		BUG_ON(th->thread_ready);
 	}
 	th->last_ready_istate = atomic8_read(&th->interrupt_state);
+	th->last_ready_timer_fn = k->timer_cur ? (void *)k->timer_cur->fn : NULL;
+	th->last_ready_timer_arg = k->timer_cur ? k->timer_cur->arg : 0UL;
 
 	/* prepare thread to be runnable */
 	th->thread_ready = true;
@@ -994,6 +1034,18 @@ void thread_exit(void)
 {
 	/* can't free the stack we're currently using, so switch */
 	preempt_disable();
+	jmp_runtime_nosave(thread_finish_exit);
+}
+
+/**
+ * thread_exit_np - thread_exit() for a caller that already disabled preemption
+ *
+ * For a thread that must not be rescheduled between its last act and its
+ * exit (Junction: one whose address space is about to be released).
+ */
+void thread_exit_np(void)
+{
+	assert_preempt_disabled();
 	jmp_runtime_nosave(thread_finish_exit);
 }
 

@@ -364,7 +364,9 @@ static void timer_softirq_one(struct kthread *k)
 		spin_unlock(&k->timer_lock);
 
 		/* execute the timer handler */
+		k->timer_cur = e;
 		e->fn(e->arg);
+		k->timer_cur = NULL;
 		store_release(&e->executing, false);
 		spin_lock(&k->timer_lock);
 		now_us = microtime();

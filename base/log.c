@@ -74,7 +74,10 @@ void logk_bug(bool fatal, const char *expr,
 {
 	logk(LOG_EMERG, "%s: %s:%d ASSERTION '%s' FAILED IN '%s'",
 	     fatal ? "FATAL" : "WARN", file, line, expr, func);
-	// logk_backtrace();
+	/* Who called: the assertion alone rarely says (offsets are into the
+	 * binary; addr2line -e junction_run resolves them). */
+	if (fatal)
+		logk_backtrace();
 
 	if (fatal)
 		init_shutdown(EXIT_FAILURE);

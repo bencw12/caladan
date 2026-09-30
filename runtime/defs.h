@@ -371,6 +371,9 @@ struct kthread {
 
 	/* 10th cache-line, statistics counters */
 	uint64_t		stats[STAT_NR];
+
+	/* diagnostics (after the aligned members, which must not move) */
+	struct timer_entry	*timer_cur;	/* entry whose callback is running, else NULL */
 } __aligned(CACHE_LINE_SIZE * 2);
 
 /* compile-time verification of cache-line alignment */

@@ -180,12 +180,23 @@ static void stat_tcp_server(void *arg)
 	laddr.ip = 0;
 	laddr.port = STAT_PORT;
 
+	/*
+	 * The stats responder is a diagnostic; failing to start it is not a
+	 * reason to take the whole runtime down. (Seen at startup with many
+	 * runtimes competing for cores, roughly once in 250.)
+	 */
 	ret = tcp_listen(laddr, 4096, &q);
-	BUG_ON(ret);
+	if (ret) {
+		log_warn("stat: tcp_listen failed (%d), no stats server", ret);
+		return;
+	}
 
 	while (true) {
 		ret = tcp_accept(q, &c);
-		BUG_ON(ret);
+		if (ret) {
+			log_warn("stat: tcp_accept failed (%d), stats server stops", ret);
+			return;
+		}
 		ret = thread_spawn(stat_tcp_worker, c);
 		WARN_ON(ret);
 	}
